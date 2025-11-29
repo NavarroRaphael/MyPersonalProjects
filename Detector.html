@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Camera + Face / Barcode / QR + Voice Visualizer</title>
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial; margin: 0; background:#0f1724; color:#e6eef8; display:flex; height:100vh; }
+  .left { width: 65%; padding: 12px; box-sizing:border-box; }
+  .right { width: 35%; padding: 12px; box-sizing:border-box; border-left:1px solid rgba(255,255,255,0.04); }
+  .video-wrap { position:relative; background:#000; border-radius:10px; overflow:hidden; }
+  video { width:100%; height:auto; display:block; }
+  canvas { position:absolute; left:0; top:0; pointer-events:none; }
+  .controls { margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; }
+  button { background:#111827; color:#e6eef8; border:1px solid rgba(255,255,255,0.06); padding:8px 12px; border-radius:8px; cursor:pointer; }
+  button.toggle-on { background:#0ea5a4; color:#032; font-weight:600; }
+  h3 { margin:8px 0 6px; font-size:14px; color:#cfe9ff; }
+  .panel { background:#071025; padding:10px; border-radius:8px; margin-bottom:10px; }
+  pre { background:#02111a; padding:8px; border-radius:6px; color:#bfe7ff; overflow:auto; max-height:180px; }
+  canvas#waveCanvas { width:100%; height:100px; background:#00121a; border-radius:6px; display:block; }
+  .status { font-size:13px; color:#9fb7d9; margin-top:6px;}
+  .small { font-size:12px; color:#9aaec6; }
+</style>
+</head>
+<body>
+  <div class="left">
+    <div class="video-wrap" id="videoWrap">
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="overlay"></canvas>
+    </div>
+
+    <div class="controls">
+      <button id="startCamera">Start Camera</button>
+      <button id="stopCamera">Stop Camera</button>
+      <button id="toggleFace" class="toggle-off">Face Detect: OFF</button>
+      <button id="toggleBarcode" class="toggle-off">Barcode/QR: OFF</button>
+      <button id="startMic">Start Mic</button>
+      <button id="stopMic">Stop Mic</button>
+    </div>
+
+    <div class="panel">
+      <h3>Detected barcodes / QR</h3>
+      <div id="barcodeLog" class="small">None detected yet.</div>
+    </div>
+
+    <div class="panel">
+      <h3>Face detection & landmarks</h3>
+      <div id="faceInfo" class="small">Face detection is OFF.</div>
+      <div class="status" id="modelStatus"></div>
+    </div>
+  </div>
+
+  <div class="right">
+    <div class="panel">
+      <h3>Speech recognition (transcript)</h3>
+      <div id="transcript" style="min-height:70px">Microphone is off.</div>
+      <div class="small">Speech recognition uses the Web Speech API (browser dependent).</div>
+    </div>
+
+    <div class="panel">
+      <h3>Vocal pattern (waveform)</h3>
+      <canvas id="waveCanvas"></canvas>
+      <div class="small" id="audioState">Audio: off</div>
+    </div>
+
+    <div class="panel">
+      <h3>Notes</h3>
+      <ul class="small">
+        <li>Face detection shows landmarks (eyes, nose, lips, face mesh).</li>
+        <li>No personal identification is performed.</li>
+        <li>For best results, allow camera/mic and have sufficient light.</li>
+      </ul>
+    </div>
+  </div>
+
+<!-- Libraries -->
+<script src="https://unpkg.com/@tensorflow/tfjs@4.6.0/dist/tf.min.js"></script>
+<script src="https://unpkg.com/@tensorflow-models/face-landmarks-detection@1.0.4/dist/face-landmarks-detection.min.js"></script>
+<script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"></script>
+
+<script>
+(async () => {
+  // Elements
+  const video = document.getElementById('video');
+  const overlay = document.getElementById('overlay');
+  const overlayCtx = overlay.getContext('2d');
+  const startCameraBtn = document.getElementById('startCamera');
+  const stopCameraBtn = document.getElementById('stopCamera');
+  const toggleFaceBtn = document.getElementById('toggleFace');
+  const toggleBarcodeBtn = document.getElementById('toggleBarcode');
+  const barcodeLog = document.getElementById('barcodeLog');
+  const faceInfo = document.getElementById('faceInfo');
+  const modelStatus = document.getElementById('modelStatus');
+
+  // Audio elements
+  const startMicBtn = document.getElementById('startMic');
+  const stopMicBtn = document.getElementById('stopMic');
+  const transcriptDiv = document.getElementById('transcript');
+  const waveCanvas = document.getElementById('waveCanvas');
+  const waveCtx = waveCanvas.getContext('2d');
+  const audioState = document.getElementById('audioState');
+
+  // State
+  let stream = null;
+  let faceModel = null;
+  let faceDetectionOn = false;
+  let barcodeOn = false;
+  let running = false;
+  let detectLoopHandle = null;
+  let barcodeDetectorSupported = ('BarcodeDetector' in window);
+  let lastBarcode = null;
+
+  // Audio / Speech
+  let audioStream = null;
+  let audioCtx = null;
+  let analyser = null;
+  let dataArray = null;
+  let rafId = null;
+  let recognition = null;
+
+  // Start / stop camera
+  async function startCamera() {
+    if (stream) return;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+      video.srcObject = stream;
+      await video.play();
+      resizeOverlay();
+      running = true;
+      startDetectionLoop();
+      console.log('Camera started');
+    } catch (err) {
+      alert('Camera start error: ' + err.message);
+    }
+  }
+  function stopCamera() {
+    if (!stream) return;
+    stream.getTracks().forEach(t => t.stop());
+    stream = null;
+    video.pause();
+    video.srcObject = null;
+    running = false;
+    cancelAnimationFrame(detectLoopHandle);
+    overlayCtx.clearRect(0,0,overlay.width, overlay.height);
+    barcodeLog.innerText = 'None detected yet.';
+    faceInfo.innerText = 'Face detection is OFF.';
+  }
+
+  startCameraBtn.onclick = startCamera;
+  stopCameraBtn.onclick = stopCamera;
+
+  // Toggle face detection
+  toggleFaceBtn.onclick = async () => {
+    faceDetectionOn = !faceDetectionOn;
+    toggleFaceBtn.classList.toggle('toggle-on', faceDetectionOn);
+    toggleFaceBtn.textContent = 'Face Detect: ' + (faceDetectionOn ? 'ON' : 'OFF');
+    if (faceDetectionOn && !faceModel) {
+      modelStatus.innerText = 'Loading face model...';
+      // load the face mesh model (MediaPipe / TF)
+      faceModel = await faceLandmarksDetection.load(faceLandmarksDetection.SupportedPackages.mediapipeFacemesh);
+      modelStatus.innerText = 'Face model loaded.';
+    } else if (!faceDetectionOn) {
+      modelStatus.innerText = '';
+    }
+  };
+
+  // Toggle barcode detection
+  toggleBarcodeBtn.onclick = () => {
+    barcodeOn = !barcodeOn;
+    toggleBarcodeBtn.classList.toggle('toggle-on', barcodeOn);
+    toggleBarcodeBtn.textContent = 'Barcode/QR: ' + (barcodeOn ? 'ON' : 'OFF');
+
+    if (barcodeOn) {
+      barcodeLog.innerText = 'Waiting for barcodes / QR...';
+      if (barcodeDetectorSupported) {
+        // Try to get supported formats (optional)
+        try {
+          const bd = new BarcodeDetector();
+          // no-op, we'll use it below in detect loop
+        } catch (e) {
+          console.warn('BarcodeDetector init failed', e);
+        }
+      } else {
+        // fallback uses jsQR for QR scanning only
+        barcodeLog.innerText += ' (Browser lacks BarcodeDetector; using QR fallback)';
+      }
+    } else {
+      barcodeLog.innerText = 'Barcode/QR detection disabled.';
+    }
+  };
+
+  // Resize overlay to match video
+  function resizeOverlay() {
+    overlay.width = video.videoWidth;
+    overlay.height = video.videoHeight;
+    overlay.style.width = video.offsetWidth + 'px';
+    overlay.style.height = video.offsetHeight + 'px';
+  }
+  window.addEventListener('resize', () => { if (video.videoWidth) resizeOverlay(); });
+
+  // Detection loop
+  async function startDetectionLoop() {
+    async function step() {
+      if (!running) return;
+      if (video.readyState >= 2) {
+        if (!overlay.width || overlay.width !== video.videoWidth) resizeOverlay();
+        overlayCtx.clearRect(0,0,overlay.width,overlay.height);
+        // face detection + landmarks
+        if (faceDetectionOn && faceModel) {
+          try {
+            const predictions = await faceModel.estimateFaces({ input: video, returnTensors: false, flipHorizontal: false });
+            if (predictions && predictions.length) {
+              faceInfo.innerText = predictions.length + ' face(s) detected.';
+              for (const pred of predictions) {
+                drawFacePrediction(pred);
+              }
+            } else {
+              faceInfo.innerText = 'No faces detected.';
+            }
+          } catch (err) {
+            console.warn('face detection error', err);
+          }
+        }
+
+        // barcode detection
+        if (barcodeOn) {
+          try {
+            if (barcodeDetectorSupported) {
+              // use native API
+              const detector = new BarcodeDetector();
+              // draw a small hidden canvas to get image bitmap
+              const vcanvas = document.createElement('canvas');
+              vcanvas.width = video.videoWidth;
+              vcanvas.height = video.videoHeight;
+              const vctx = vcanvas.getContext('2d');
+              vctx.drawImage(video, 0, 0, vcanvas.width, vcanvas.height);
+              const imgData = await createImageBitmap(vcanvas);
+              const results = await detector.detect(imgData);
+              if (results && results.length) {
+                results.forEach(r => {
+                  if (r.rawValue && r.rawValue !== lastBarcode) {
+                    lastBarcode = r.rawValue;
+                    logBarcode(r.format, r.rawValue);
+                  }
+                  // draw bounding box
+                  drawBarcodeBox(r.boundingBox);
+                });
+              }
+            } else {
+              // fallback: try jsQR (QR only)
+              const fallCanvas = document.createElement('canvas');
+              fallCanvas.width = video.videoWidth;
+              fallCanvas.height = video.videoHeight;
+              const fallCtx = fallCanvas.getContext('2d');
+              fallCtx.drawImage(video, 0, 0, fallCanvas.width, fallCanvas.height);
+              const img = fallCtx.getImageData(0,0,fallCanvas.width, fallCanvas.height);
+              const q = jsQR(img.data, img.width, img.height);
+              if (q) {
+                if (q.data && q.data !== lastBarcode) {
+                  lastBarcode = q.data;
+                  logBarcode('QR (fallback)', q.data);
+                }
+                // draw polygon
+                overlayCtx.strokeStyle = 'lime';
+                overlayCtx.lineWidth = 3;
+                overlayCtx.beginPath();
+                overlayCtx.moveTo(q.location.topLeftCorner.x, q.location.topLeftCorner.y);
+                overlayCtx.lineTo(q.location.topRightCorner.x, q.location.topRightCorner.y);
+                overlayCtx.lineTo(q.location.bottomRightCorner.x, q.location.bottomRightCorner.y);
+                overlayCtx.lineTo(q.location.bottomLeftCorner.x, q.location.bottomLeftCorner.y);
+                overlayCtx.closePath();
+                overlayCtx.stroke();
+              }
+            }
+          } catch (err) {
+            console.warn('barcode detect err', err);
+          }
+        }
+      }
+      detectLoopHandle = requestAnimationFrame(step);
+    }
+    step();
+  }
+
+  function drawFacePrediction(pred) {
+    overlayCtx.save();
+    // bounding box
+    overlayCtx.strokeStyle = 'aqua';
+    overlayCtx.lineWidth = 2;
+    if (pred.boundingBox) {
+      const [x, y, w, h] = [pred.boundingBox.topLeft[0], pred.boundingBox.topLeft[1],
+                           pred.boundingBox.bottomRight[0] - pred.boundingBox.topLeft[0],
+                           pred.boundingBox.bottomRight[1] - pred.boundingBox.topLeft[1]];
+      overlayCtx.strokeRect(x, y, w, h);
+    }
+    // draw landmarks (scaled)
+    if (pred.scaledMesh) {
+      overlayCtx.fillStyle = 'rgba(0,200,200,0.8)';
+      for (let i=0;i<pred.scaledMesh.length;i+=2) {
+        // scaledMesh is an array of [x,y,z] vectors -- but face-landmarks-detection returns nested arrays
+      }
+      // more convenient: loop points
+      for (const pt of pred.scaledMesh) {
+        overlayCtx.beginPath();
+        overlayCtx.arc(pt[0], pt[1], 1.6, 0, Math.PI*2);
+        overlayCtx.fill();
+      }
+    }
+    // draw a few named keypoints (if available)
+    if (pred.annotations) {
+      overlayCtx.strokeStyle = 'rgba(255,160,0,0.9)';
+      overlayCtx.lineWidth = 1.5;
+      // eyes
+      drawPolyline(pred.annotations.leftEyeUpper0, true);
+      drawPolyline(pred.annotations.rightEyeUpper0, true);
+      // lips
+      drawPolyline(pred.annotations.lipsUpperOuter, true);
+      // nose
+      drawPolyline(pred.annotations.noseTip, false);
+    }
+    overlayCtx.restore();
+  }
+
+  function drawPolyline(points, close) {
+    if (!points || points.length === 0) return;
+    overlayCtx.beginPath();
+    overlayCtx.moveTo(points[0][0], points[0][1]);
+    for (let i=1;i<points.length;i++) overlayCtx.lineTo(points[i][0], points[i][1]);
+    if (close) overlayCtx.closePath();
+    overlayCtx.stroke();
+  }
+
+  function drawBarcodeBox(box) {
+    overlayCtx.strokeStyle = 'lime';
+    overlayCtx.lineWidth = 3;
+    overlayCtx.beginPath();
+    overlayCtx.rect(box.x, box.y, box.width, box.height);
+    overlayCtx.stroke();
+  }
+
+  function logBarcode(format, value) {
+    barcodeLog.innerText = `Format: ${format}\nValue: ${value}`;
+    console.log('Detected barcode', format, value);
+  }
+
+  // --- Audio / Speech recognition and waveform ---
+  startMicBtn.onclick = async () => {
+    if (audioStream) return;
+    try {
+      audioStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      audioState.innerText = 'Audio: streaming';
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioCtx.createMediaStreamSource(audioStream);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 2048;
+      const bufferLength = analyser.fftSize;
+      dataArray = new Uint8Array(bufferLength);
+      source.connect(analyser);
+      drawWaveform();
+
+      // Speech recognition (if supported)
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
+        recognition.onresult = (evt) => {
+          let interim = '';
+          let final = '';
+          for (let i = evt.resultIndex; i < evt.results.length; ++i) {
+            if (evt.results[i].isFinal) final += evt.results[i][0].transcript;
+            else interim += evt.results[i][0].transcript;
+          }
+          transcriptDiv.innerHTML = `<strong>Final:</strong> ${final}<br/><em>Interim:</em> ${interim}`;
+        };
+        recognition.onerror = (e) => {
+          console.warn('Speech recognition error', e);
+        };
+        recognition.onend = () => {
+          console.log('Speech recognition ended');
+        };
+        recognition.start();
+      } else {
+        transcriptDiv.innerText = 'SpeechRecognition not supported in this browser.';
+      }
+    } catch (err) {
+      alert('Microphone error: ' + err.message);
+    }
+  };
+
+  stopMicBtn.onclick = () => {
+    if (audioStream) {
+      audioStream.getTracks().forEach(t => t.stop());
+      audioStream = null;
+    }
+    if (audioCtx) {
+      audioCtx.close();
+      audioCtx = null;
+    }
+    if (recognition) {
+      try { recognition.stop(); } catch(e) {}
+      recognition = null;
+    }
+    audioState.innerText = 'Audio: off';
+    cancelAnimationFrame(rafId);
+    waveCtx.clearRect(0,0,waveCanvas.width,waveCanvas.height);
+    transcriptDiv.innerText = 'Microphone is off.';
+  };
+
+  // Waveform drawing
+  function drawWaveform() {
+    if (!analyser) return;
+    const draw = () => {
+      rafId = requestAnimationFrame(draw);
+      analyser.getByteTimeDomainData(dataArray);
+      waveCanvas.width = waveCanvas.clientWidth * devicePixelRatio;
+      waveCanvas.height = 100 * devicePixelRatio;
+      waveCtx.clearRect(0, 0, waveCanvas.width, waveCanvas.height);
+      waveCtx.lineWidth = 2;
+      waveCtx.beginPath();
+      const sliceWidth = waveCanvas.width / dataArray.length;
+      let x = 0;
+      for (let i=0;i<dataArray.length;i++) {
+        const v = dataArray[i] / 128.0;
+        const y = v * (waveCanvas.height/2);
+        if (i === 0) waveCtx.moveTo(x, y);
+        else waveCtx.lineTo(x, y);
+        x += sliceWidth;
+      }
+      waveCtx.strokeStyle = '#7ee7ff';
+      waveCtx.stroke();
+    };
+    draw();
+  }
+
+  // Start auto-run detection loop when camera ready
+  // handle if video plays later
+  video.addEventListener('play', () => {
+    running = true;
+    startDetectionLoop();
+  });
+
+  // Clean up when page is closed or refreshed
+  window.addEventListener('beforeunload', () => {
+    try { stopCamera(); stopMicBtn.onclick(); } catch(e) {}
+  });
+
+  // Provide small friendly automatic hint if BarcodeDetector is missing
+  if (!barcodeDetectorSupported) {
+    console.info('BarcodeDetector not supported in this browser. QR fallback enabled via jsQR.');
+  }
+
+  // A tiny polyfill note: face-landmarks-detection model is loaded when toggled on.
+})();
+</script>
+</body>
+</html>
+ 
