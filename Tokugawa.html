@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+
+    <title>Employee Portal</title>
+
+    
+    <h1>Tokugawa Innovative Inc.</h1>
+    <h1>Innovation is key to a bright future</h1>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+            margin: 0;
+            padding: 0;
+        }
+        .container {
+            width: 60%;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: white;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+        label {
+            font-size: 1.1em;
+            margin-top: 10px;
+            display: block;
+        }
+        input[type="text"], input[type="email"], input[type="password"], select {
+            width: 100%;
+            padding: 10px;
+            margin-top: 5px;
+            margin-bottom: 15px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+        button {
+            display: block;
+            width: 100%;
+            padding: 10px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 1.1em;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        .settings {
+            text-align: center;
+            margin-top: 20px;
+        }
+        .settings a {
+            color: #007BFF;
+            text-decoration: none;
+            font-size: 1em;
+        }
+        .settings a:hover {
+            text-decoration: underline;
+        }
+        .form-container {
+            display: flex;
+            justify-content: space-between;
+            gap: 20px;
+        }
+        .form-container > div {
+            width: 48%;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>Employee Portal</h1>
+
+        <!-- Login Form -->
+        <div class="form-container">
+            <div>
+                <h2>Login</h2>
+                <form action="login_backend.php" method="POST">
+                    <label for="loginUsername">Username (Employee Number)</label>
+                    <input type="text" id="loginUsername" name="username" required>
+
+                    <label for="loginPassword">Password</label>
+                    <input type="password" id="loginPassword" name="password" required>
+
+                    <button type="submit">Login</button>
+                </form>
+            </div>
+
+            <!-- Personal Information Form -->
+            <div>
+                <h2>Fill Personal Information</h2>
+                <form action="register_backend.php" method="POST">
+                    <label for="name">Full Name</label>
+                    <input type="text" id="name" name="name" required>
+
+                    <label for="email">Email Address</label>
+                    <input type="email" id="email" name="email" required>
+
+                    <label for="empNumber">Employee Number</label>
+                    <input type="text" id="empNumber" name="empNumber" required>
+
+                    <label for="branch">Branch</label>
+                    <input type="text" id="branch" name="branch" required>
+
+                    <label for="department">Department</label>
+                    <input type="text" id="department" name="department" required>
+
+                    <label for="password">Password</label>
+                    <input type="password" id="password" name="password" required>
+
+                    <button type="submit">Register</button>
+                </form>
+            </div>
+        </div>
+
+        <!-- Settings Link -->
+        <div class="settings">
+            <a href="#">Settings</a>
+        </div>
+    </div>
+
+</body>
+</html>
